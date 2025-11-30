@@ -118,7 +118,6 @@ void arm_delay_us(int microseconds) {
 }
 
 int main(void) {
-    const char *chipname = "gpiochip0";
     unsigned int offsets[] = {
         STREET_A_RED, STREET_A_YELLOW, STREET_A_GREEN,
         STREET_B_RED, STREET_B_YELLOW, STREET_B_GREEN
@@ -140,13 +139,37 @@ int main(void) {
     // Set up signal handler for Ctrl+C
     signal(SIGINT, signal_handler);
     
-    // Open GPIO chip
-    struct gpiod_chip *chip = gpiod_chip_open(chipname);
+    // Try to open GPIO chip - try different possible paths
+    const char *chip_paths[] = {
+        "/dev/gpiochip0",
+        "/dev/gpiochip4",
+        "gpiochip0",
+        "gpiochip4",
+        NULL
+    };
+    
+    struct gpiod_chip *chip = NULL;
+    const char *working_path = NULL;
+    
+    printf("Searching for GPIO chip...\n");
+    for (int i = 0; chip_paths[i] != NULL; i++) {
+        printf("  Trying %s... ", chip_paths[i]);
+        chip = gpiod_chip_open(chip_paths[i]);
+        if (chip) {
+            printf("✓ Success!\n");
+            working_path = chip_paths[i];
+            break;
+        }
+        printf("✗\n");
+    }
+    
     if (!chip) {
-        perror("Failed to open GPIO chip");
-        printf("Try: sudo apt install libgpiod-dev\n");
+        fprintf(stderr, "\nFailed to open any GPIO chip!\n");
+        fprintf(stderr, "Available chips: ls /dev/gpio*\n");
         return 1;
     }
+    
+    printf("Using GPIO chip: %s\n\n", working_path);
     
     printf("Configuring GPIO pins...\n");
     
