@@ -1,6 +1,6 @@
 /*
  * ARM Assembly Traffic Light Controller for Raspberry Pi 5
- * Uses libgpiod library for proper Pi 5 GPIO support
+ * Uses libgpiod v2.x library for proper Pi 5 GPIO support
  * 
  * Hardware Setup:
  * Street A (North-South):
@@ -37,14 +37,15 @@
 #define STREET_B_YELLOW 24
 #define STREET_B_GREEN  25
 
+#define NUM_LEDS 6
+
 // Timing (in microseconds)
 #define GREEN_TIME      5000000   // 5 seconds
 #define YELLOW_TIME     1000000   // 1 second
 #define SAFETY_BUFFER   1000000   // 1 second both red
 
-// GPIO chip and lines
-struct gpiod_chip *chip;
-struct gpiod_line *lines[6];
+// GPIO line requests (libgpiod v2.x)
+struct gpiod_line_request *request;
 
 volatile int keep_running = 1;
 
@@ -54,10 +55,9 @@ void signal_handler(int sig) {
 }
 
 // Set GPIO pin using inline ARM assembly for bit manipulation
-void gpio_set_value_asm(struct gpiod_line *line, int value) {
-    // This demonstrates ARM assembly even though we're using library calls
-    // The actual GPIO setting is done by the library, but we can show
-    // ARM bit manipulation for the value
+void gpio_set_value_asm(unsigned int offset, int value) {
+    // This demonstrates ARM assembly for bit manipulation
+    // The actual GPIO setting is done by the library
     int result;
     
     __asm__ volatile (
@@ -66,11 +66,16 @@ void gpio_set_value_asm(struct gpiod_line *line, int value) {
         : [value] "r" (value)
     );
     
-    gpiod_line_set_value(line, result);
+    gpiod_line_request_set_value(request, offset, result);
 }
 
 // Turn off all lights using ARM assembly logic
 void all_lights_off(void) {
+    unsigned int offsets[] = {
+        STREET_A_RED, STREET_A_YELLOW, STREET_A_GREEN,
+        STREET_B_RED, STREET_B_YELLOW, STREET_B_GREEN
+    };
+    
     int zero_value = 0;
     
     // Use ARM assembly to set zero value (demonstration)
@@ -79,8 +84,8 @@ void all_lights_off(void) {
         : [zero] "=r" (zero_value)
     );
     
-    for (int i = 0; i < 6; i++) {
-        gpiod_line_set_value(lines[i], zero_value);
+    for (int i = 0; i < NUM_LEDS; i++) {
+        gpiod_line_request_set_value(request, offsets[i], zero_value);
     }
 }
 
@@ -90,14 +95,14 @@ void set_light_state(char street_a_color, char street_b_color) {
     all_lights_off();
     
     // Street A
-    if (street_a_color == 'R') gpio_set_value_asm(lines[0], 1);
-    else if (street_a_color == 'Y') gpio_set_value_asm(lines[1], 1);
-    else if (street_a_color == 'G') gpio_set_value_asm(lines[2], 1);
+    if (street_a_color == 'R') gpio_set_value_asm(STREET_A_RED, 1);
+    else if (street_a_color == 'Y') gpio_set_value_asm(STREET_A_YELLOW, 1);
+    else if (street_a_color == 'G') gpio_set_value_asm(STREET_A_GREEN, 1);
     
     // Street B
-    if (street_b_color == 'R') gpio_set_value_asm(lines[3], 1);
-    else if (street_b_color == 'Y') gpio_set_value_asm(lines[4], 1);
-    else if (street_b_color == 'G') gpio_set_value_asm(lines[5], 1);
+    if (street_b_color == 'R') gpio_set_value_asm(STREET_B_RED, 1);
+    else if (street_b_color == 'Y') gpio_set_value_asm(STREET_B_YELLOW, 1);
+    else if (street_b_color == 'G') gpio_set_value_asm(STREET_B_GREEN, 1);
 }
 
 // Print current state
@@ -109,23 +114,19 @@ void print_state(const char* street_a, const char* street_b, int cycle) {
 
 // Delay using ARM assembly
 void arm_delay_us(int microseconds) {
-    // Calculate loop count (very rough approximation)
-    // On a 2.4 GHz CPU, this is about 2.4 cycles per nanosecond
-    // So for microseconds, we need roughly 2400 iterations per microsecond
-    // But we'll just use usleep for accuracy and add ARM assembly elsewhere
     usleep(microseconds);
 }
 
 int main(void) {
     const char *chipname = "gpiochip0";
-    unsigned int pin_offsets[] = {
+    unsigned int offsets[] = {
         STREET_A_RED, STREET_A_YELLOW, STREET_A_GREEN,
         STREET_B_RED, STREET_B_YELLOW, STREET_B_GREEN
     };
     
     printf("╔════════════════════════════════════════════════════════╗\n");
     printf("║   ARM Assembly Traffic Light Controller - Pi 5        ║\n");
-    printf("║   Two-Way Intersection Simulator (libgpiod)           ║\n");
+    printf("║   Two-Way Intersection Simulator (libgpiod v2)        ║\n");
     printf("╚════════════════════════════════════════════════════════╝\n\n");
     
     printf("Pin Configuration:\n");
@@ -140,7 +141,7 @@ int main(void) {
     signal(SIGINT, signal_handler);
     
     // Open GPIO chip
-    chip = gpiod_chip_open_by_name(chipname);
+    struct gpiod_chip *chip = gpiod_chip_open(chipname);
     if (!chip) {
         perror("Failed to open GPIO chip");
         printf("Try: sudo apt install libgpiod-dev\n");
@@ -149,27 +150,66 @@ int main(void) {
     
     printf("Configuring GPIO pins...\n");
     
-    // Request GPIO lines as outputs
+    // Configure line request settings (libgpiod v2.x API)
+    struct gpiod_line_settings *settings = gpiod_line_settings_new();
+    if (!settings) {
+        fprintf(stderr, "Failed to create line settings\n");
+        gpiod_chip_close(chip);
+        return 1;
+    }
+    
+    // Set as output with initial value 0
+    gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT);
+    gpiod_line_settings_set_output_value(settings, GPIOD_LINE_VALUE_INACTIVE);
+    
+    // Create line config
+    struct gpiod_line_config *line_cfg = gpiod_line_config_new();
+    if (!line_cfg) {
+        fprintf(stderr, "Failed to create line config\n");
+        gpiod_line_settings_free(settings);
+        gpiod_chip_close(chip);
+        return 1;
+    }
+    
+    // Add all offsets to config with same settings
+    for (int i = 0; i < NUM_LEDS; i++) {
+        gpiod_line_config_add_line_settings(line_cfg, &offsets[i], 1, settings);
+    }
+    
+    // Create request config
+    struct gpiod_request_config *req_cfg = gpiod_request_config_new();
+    if (!req_cfg) {
+        fprintf(stderr, "Failed to create request config\n");
+        gpiod_line_config_free(line_cfg);
+        gpiod_line_settings_free(settings);
+        gpiod_chip_close(chip);
+        return 1;
+    }
+    gpiod_request_config_set_consumer(req_cfg, "traffic_light");
+    
+    // Request the lines
+    request = gpiod_chip_request_lines(chip, req_cfg, line_cfg);
+    if (!request) {
+        perror("Failed to request GPIO lines");
+        gpiod_request_config_free(req_cfg);
+        gpiod_line_config_free(line_cfg);
+        gpiod_line_settings_free(settings);
+        gpiod_chip_close(chip);
+        return 1;
+    }
+    
+    // Clean up config objects (no longer needed after request)
+    gpiod_request_config_free(req_cfg);
+    gpiod_line_config_free(line_cfg);
+    gpiod_line_settings_free(settings);
+    
     const char *line_names[] = {
         "Street A Red", "Street A Yellow", "Street A Green",
         "Street B Red", "Street B Yellow", "Street B Green"
     };
     
-    for (int i = 0; i < 6; i++) {
-        lines[i] = gpiod_chip_get_line(chip, pin_offsets[i]);
-        if (!lines[i]) {
-            fprintf(stderr, "Failed to get GPIO line %d\n", pin_offsets[i]);
-            gpiod_chip_close(chip);
-            return 1;
-        }
-        
-        if (gpiod_line_request_output(lines[i], "traffic_light", 0) < 0) {
-            fprintf(stderr, "Failed to request GPIO line %d as output\n", pin_offsets[i]);
-            gpiod_chip_close(chip);
-            return 1;
-        }
-        
-        printf("  ✓ Configured GPIO %d (%s)\n", pin_offsets[i], line_names[i]);
+    for (int i = 0; i < NUM_LEDS; i++) {
+        printf("  ✓ Configured GPIO %d (%s)\n", offsets[i], line_names[i]);
     }
     
     // Make sure all lights start off
@@ -226,9 +266,7 @@ int main(void) {
     all_lights_off();
     
     // Release GPIO lines
-    for (int i = 0; i < 6; i++) {
-        gpiod_line_release(lines[i]);
-    }
+    gpiod_line_request_release(request);
     gpiod_chip_close(chip);
     
     printf("Traffic light stopped. Stay safe out there! 🚦\n");
